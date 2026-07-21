@@ -1,0 +1,266 @@
+{
+  "info": {
+    "name": "Echo-Breaker API",
+    "description": "Colección de pruebas para los endpoints de análisis de Echo-Breaker",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:4000/api"
+    },
+    {
+      "key": "analysis_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health Check",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('status es ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. POST Analizar texto (primera vez)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"text\": \"El gobierno anunció ayer una nueva reforma fiscal que, según críticos, afectará principalmente a la clase media. Los defensores de la medida argumentan que traerá mayor recaudación para programas sociales, mientras que la oposición califica la propuesta de improvisada y perjudicial para la economía nacional.\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/analyses",
+          "host": ["{{base_url}}"],
+          "path": ["analyses"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 201', () => pm.response.to.have.status(201));",
+              "const json = pm.response.json();",
+              "pm.test('Tiene _id', () => pm.expect(json._id).to.be.a('string'));",
+              "pm.test('languageBreakdown suma 100', () => {",
+              "  const total = Object.values(json.languageBreakdown).reduce((a,b) => a+b, 0);",
+              "  pm.expect(total).to.eql(100);",
+              "});",
+              "pm.collectionVariables.set('analysis_id', json._id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. POST Analizar texto (repetido - prueba de caché)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"text\": \"El gobierno anunció ayer una nueva reforma fiscal que, según críticos, afectará principalmente a la clase media. Los defensores de la medida argumentan que traerá mayor recaudación para programas sociales, mientras que la oposición califica la propuesta de improvisada y perjudicial para la economía nacional.\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/analyses",
+          "host": ["{{base_url}}"],
+          "path": ["analyses"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200 (viene de caché, no 201)', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "pm.test('Mismo _id que el análisis anterior', () => {",
+              "  pm.expect(json._id).to.eql(pm.collectionVariables.get('analysis_id'));",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. POST Analizar URL",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"url\": \"https://www.bbc.com/mundo\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/analyses",
+          "host": ["{{base_url}}"],
+          "path": ["analyses"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200 o 201', () => {",
+              "  pm.expect([200,201]).to.include(pm.response.code);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. POST Texto corto (debe fallar 400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"text\": \"Hola\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/analyses",
+          "host": ["{{base_url}}"],
+          "path": ["analyses"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 400', () => pm.response.to.have.status(400));",
+              "pm.test('Tiene mensaje de error', () => pm.expect(pm.response.json().error).to.be.a('string'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. POST Sin text ni url (debe fallar 400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "url": {
+          "raw": "{{base_url}}/analyses",
+          "host": ["{{base_url}}"],
+          "path": ["analyses"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 400', () => pm.response.to.have.status(400));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. GET Listar análisis",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/analyses?limit=10",
+          "host": ["{{base_url}}"],
+          "path": ["analyses"],
+          "query": [
+            { "key": "limit", "value": "10" }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Es un array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. GET Análisis por id (existente)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/analyses/{{analysis_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["analyses", "{{analysis_id}}"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const json = pm.response.json();",
+              "pm.test('_id coincide', () => pm.expect(json._id).to.eql(pm.collectionVariables.get('analysis_id')));",
+              "pm.test('Tiene keywords', () => pm.expect(json.keywords).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. GET Análisis por id (inexistente - 404)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/analyses/00000000-0000-0000-0000-000000000000",
+          "host": ["{{base_url}}"],
+          "path": ["analyses", "00000000-0000-0000-0000-000000000000"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Status 404', () => pm.response.to.have.status(404));",
+              "pm.test('Mensaje de no encontrado', () => pm.expect(pm.response.json().error).to.include('no encontrado'));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

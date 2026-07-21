@@ -1,0 +1,324 @@
+# Echo-Breaker Backend
+
+**Echo-Breaker** es una API REST que analiza textos o contenidos extraídos de URLs para detectar posibles sesgos cognitivos y efectos de "cámara de eco". Utiliza inteligencia artificial (Cerebras) para evaluar el tono, la carga emocional y el tipo de lenguaje, y complementa el análisis con contra‑narrativas obtenidas de fuentes externas (GNews).
+
+---
+
+## Tecnologías
+
+- **Node.js** + **Express** – servidor web.
+- **PostgreSQL** – almacenamiento persistente con caché.
+- **Cerebras API** – modelo de lenguaje para el análisis de sesgo.
+- **GNews API** – búsqueda de noticias para contra‑narrativas.
+- **Cheerio** + **Axios** – extracción de texto desde URLs.
+- **Postman** – pruebas de integración documentadas.
+
+---
+
+## Estructura de Archivos
+
+```
+echo-breaker-backend/
+├── src/
+│   ├── config/
+│   │   ├── cerebras.js          # Cliente OpenAI para Cerebras
+│   │   └── db.js                # Pool de conexión a PostgreSQL
+│   ├── controllers/
+│   │   └── analysisController.js # Lógica de los endpoints
+│   ├── middleware/
+│   │   └── errorHandler.js      # Manejo centralizado de errores
+│   ├── models/
+│   │   └── Analysis.js          # Modelo Mongoose (no usado, legacy)
+│   ├── routes/
+│   │   └── analysisRoutes.js    # Definición de rutas /api/analyses
+│   ├── services/
+│   │   ├── cerebrasService.js   # Llamada a Cerebras y normalización
+│   │   ├── databaseService.js   # Operaciones CRUD y caché
+│   │   ├── newsService.js       # Consulta a GNews
+│   │   └── textExtractor.js     # Extracción de texto desde URL
+│   ├── app.js                   # Configuración de Express
+│   └── server.js                # Punto de entrada, conexión a DB
+├── db/
+│   ├── schema.sql               # Definición de tablas e índices
+│   └── runSchema.js             # Script para ejecutar schema.sql
+├── .env.example                 # Variables de entorno (crear .env)
+├── package.json
+├── package-lock.json
+└── Echo-Breaker.postman_collection.json  # Colección de pruebas
+```
+
+---
+
+## Flujo de Procesamiento
+
+El siguiente diagrama muestra cómo se atiende una solicitud de análisis:
+
+```
+[Cliente] → POST /api/analyses (text o url)
+               │
+               ▼
+         ¿Es URL? → Sí → extraer texto (cheerio)
+               │
+               ▼
+         Validar longitud mínima (≥50 caracteres)
+               │
+               ▼
+         Calcular hash (SHA256 del texto o URL)
+               │
+               ▼
+         Buscar en análisis_cache → ¿Existe?
+               │ Sí                │ No
+               ▼                   ▼
+         Devolver análisis   Llamar a Cerebras (analyzeBias)
+         guardado (200)             │
+                                    ▼
+                              Obtener: resumen, tono,
+                              tipo de sitio, breakdown
+                              de lenguaje y keywords
+                                    │
+                                    ▼
+                              Buscar contra‑narrativas
+                              en GNews con las keywords
+                                    │
+                                    ▼
+                              Guardar todo en BD
+                              (transacción)
+                                    │
+                                    ▼
+                              Devolver análisis (201)
+```
+
+### Paso a Paso
+
+1. **Recepción** – El cliente envía `text` o `url` en el cuerpo de la petición.
+2. **Extracción** – Si se envió `url`, se descarga el HTML y se extrae el contenido principal (título + párrafos) usando Cheerio. Se ignoran etiquetas no relevantes (scripts, estilos, etc.).
+3. **Validación** – El texto resultante debe tener al menos 50 caracteres; de lo contrario, se retorna un error `400`.
+4. **Caché** – Se calcula un hash SHA256 del texto (o de la URL si se usó URL). Se consulta la tabla `analysis_cache`; si existe, se devuelve el análisis guardado previamente (status `200`).
+5. **Análisis con IA** – Si no está en caché, se envía el texto a Cerebras (modelo `llama-3.3-70b`) con un prompt estructurado que pide:
+   - Resumen
+   - Tono detectado (`informativo`, `polarizante`, `neutral`, `emocional`, `agresivo`, `persuasivo`)
+   - Tipo de sitio web
+   - Desglose de lenguaje en 6 categorías (académico, agresivo, emocional, informativo, persuasivo, neutral), con porcentajes que suman 100.
+   - Lista de 5 palabras clave.
+   - La respuesta se normaliza para garantizar que los porcentajes sumen exactamente 100 (mediante escalado y redondeo).
+6. **Contra‑narrativas** – Con las keywords obtenidas, se consulta la API de GNews para obtener hasta 4 artículos relacionados que ofrezcan perspectivas alternativas.
+7. **Persistencia** – Todo se guarda en una transacción PostgreSQL:
+   - Inserta el registro principal en `analyses`.
+   - Inserta los porcentajes de lenguaje en `analysis_language_scores`.
+   - Inserta las palabras clave en `keywords` (si no existen) y las relaciona en `analysis_keywords`.
+   - Inserta las contra‑narrativas en `counter_narratives`.
+   - Inserta la entrada en `analysis_cache` con el hash.
+8. **Respuesta** – Se devuelve el objeto completo al cliente con status `201`.
+
+---
+
+## Base de Datos
+
+### Diagrama Entidad‑Relación
+
+```
+┌─────────────────┐          ┌─────────────────────────────┐
+│   analyses      │          │ analysis_language_scores    │
+├─────────────────┤          ├─────────────────────────────┤
+│ id (PK)         │◄─────────│ analysis_id (FK)           │
+│ input_type      │          │ category                    │
+│ source_url      │          │ percentage                  │
+│ original_excerpt│          └─────────────────────────────┘
+│ summary         │
+│ detected_tone   │          ┌─────────────────────────────┐
+│ website_type    │          │ counter_narratives          │
+│ created_at      │◄─────────├─────────────────────────────┤
+└────────┬────────┘          │ id (PK)                    │
+         │                   │ analysis_id (FK)           │
+         │                   │ title, source, url,        │
+         │                   │ published_at, perspective  │
+         │                   └─────────────────────────────┘
+         │
+         │    ┌─────────────────────────────┐
+         └────┤ analysis_keywords            │
+              ├─────────────────────────────┤
+              │ analysis_id (FK, PK)        │
+              │ keyword_id (FK, PK)         │
+              └──────────┬──────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────────────┐
+              │ keywords                    │
+              ├─────────────────────────────┤
+              │ id (PK)                     │
+              │ word (UNIQUE)               │
+              └─────────────────────────────┘
+
+┌─────────────────────────────┐
+│ analysis_cache               │
+├─────────────────────────────┤
+│ id (PK)                     │
+│ input_hash (UNIQUE)         │
+│ source_url                   │
+│ analysis_id (FK → analyses) │
+│ created_at                   │
+└─────────────────────────────┘
+```
+
+### Descripción de Tablas
+
+| Tabla | Descripción |
+|-------|-------------|
+| **analyses** | Almacena la información principal de cada análisis: tipo de entrada (`text`/`url`), URL de origen (si existe), el fragmento original, el resumen generado, el tono detectado, el tipo de sitio web y la fecha de creación. |
+| **analysis_language_scores** | Guarda los porcentajes asignados a cada categoría de lenguaje (académico, agresivo, emocional, informativo, persuasivo, neutral). Cada análisis tiene una fila por categoría. |
+| **keywords** | Tabla maestra de palabras clave únicas. |
+| **analysis_keywords** | Relación muchos‑a‑muchos entre análisis y palabras clave. |
+| **counter_narratives** | Contiene los artículos recuperados como contra‑narrativas para cada análisis. Incluye título, fuente, URL, fecha de publicación y una perspectiva (actualmente fija). |
+| **analysis_cache** | Tabla de caché que evita reprocesar el mismo contenido. Almacena el hash del input y referencia al análisis correspondiente. Es la clave para el sistema de cacheo. |
+
+---
+
+## Configuración y Ejecución
+
+### Variables de Entorno
+
+Crea un archivo `.env` en la raíz con las siguientes variables:
+
+```env
+# Servidor
+PORT=4000
+
+# PostgreSQL
+PG_HOST=localhost
+PG_PORT=5432
+PG_DATABASE=echo_breaker
+PG_USER=tu_usuario
+PG_PASSWORD=tu_contraseña
+PG_MAX_CONN=10
+PG_IDLE_TIMEOUT=30000
+PG_CONN_TIMEOUT=5000
+
+# Cerebras
+CEREBRAS_API_KEY=tu_api_key
+CEREBRAS_MODEL=llama-3.3-70b   # opcional
+
+# GNews
+GNEWS_API_KEY=tu_api_key
+
+# Cliente (CORS)
+CLIENT_ORIGIN=http://localhost:3000  # opcional
+```
+
+### Instalación y Arranque
+
+```bash
+# Clonar repositorio
+git clone <url>
+cd echo-breaker-backend
+
+# Instalar dependencias
+npm install
+
+# Crear base de datos y tablas (ejecutar el script)
+node db/runSchema.js
+
+# Iniciar servidor (modo desarrollo)
+npm run dev
+
+# O en producción
+npm start
+```
+
+El servidor estará disponible en `http://localhost:4000`.
+
+---
+
+## Endpoints API
+
+### Health Check
+- `GET /api/health` → `{ "status": "ok" }`
+
+### Análisis
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/api/analyses` | Crea un nuevo análisis (envía `text` o `url` en JSON). |
+| GET | `/api/analyses?limit=10` | Lista los últimos análisis (hasta 50). |
+| GET | `/api/analyses/:id` | Obtiene un análisis por su ID (UUID). |
+
+#### Ejemplo de POST (texto)
+```json
+{
+  "text": "El gobierno anunció ayer una nueva reforma fiscal..."
+}
+```
+
+#### Ejemplo de POST (URL)
+```json
+{
+  "url": "https://www.bbc.com/mundo"
+}
+```
+
+#### Respuesta exitosa (201)
+```json
+{
+  "_id": "uuid",
+  "inputType": "text",
+  "sourceUrl": null,
+  "originalExcerpt": "...",
+  "summary": "...",
+  "detectedTone": "polarizante",
+  "websiteType": "noticias",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "languageBreakdown": {
+    "academico": 10,
+    "agresivo": 5,
+    "emocional": 20,
+    "informativo": 40,
+    "persuasivo": 20,
+    "neutral": 5
+  },
+  "keywords": ["gobierno", "reforma", "fiscal", "clase media", "economía"],
+  "counterNarratives": [
+    {
+      "title": "Artículo alternativo...",
+      "source": "Fuente X",
+      "url": "https://...",
+      "publishedAt": "2026-01-01",
+      "perspective": "Cobertura externa relacionada"
+    }
+  ]
+}
+```
+
+---
+
+## Pruebas en Postman
+
+Se incluye la colección `Echo-Breaker.postman_collection.json` con las siguientes pruebas:
+
+1. **Health Check** – Verifica que el endpoint `/health` devuelva `200` y `status: ok`.
+2. **POST Analizar texto (primera vez)** – Envía un texto largo, espera `201` y valida que `_id` exista y que la suma de `languageBreakdown` sea 100. Guarda el `_id` en variable de entorno.
+3. **POST Analizar texto (repetido)** – Envía el mismo texto, espera `200` (caché) y verifica que el `_id` coincida con el anterior.
+4. **POST Analizar URL** – Envía una URL (ej. BBC Mundo) y espera `200` o `201`.
+5. **POST Texto corto** – Envía "Hola", espera `400` y mensaje de error.
+6. **POST Sin text ni url** – Envía objeto vacío, espera `400`.
+7. **GET Listar análisis** – Obtiene los últimos 10 análisis, espera `200` y que sea un array.
+8. **GET Análisis por id (existente)** – Usa el `analysis_id` guardado, espera `200`, verifica que coincida y que tenga `keywords`.
+9. **GET Análisis por id (inexistente)** – Envía un UUID inventado, espera `404` y mensaje "no encontrado".
+
+Estas pruebas aseguran el correcto funcionamiento de los endpoints, la caché y las validaciones.
+
+---
+
+## Mejoras y Consideraciones
+
+- **Manejo de errores** – Centralizado en `errorHandler.js`; todos los errores devuelven un formato JSON.
+- **Seguridad** – Las claves API se gestionan con variables de entorno.
+- **Escalabilidad** – La caché evita reprocesar contenidos idénticos, ahorrando costos de IA.
+- **Normalización de lenguaje** – El servicio `cerebrasService.js` garantiza que los porcentajes sumen 100 incluso si el modelo devuelve valores inconsistentes.
+- **Extracción de URL** – Se filtra contenido irrelevante y se prioriza el texto de párrafos para un análisis más limpio.
+- **Modelo Mongoose** – El archivo `Analysis.js` es un vestigio de una versión anterior con MongoDB; actualmente no se usa y puede ser eliminado.
+
+---
+
+
+
+---
+
